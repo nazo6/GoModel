@@ -50,7 +50,9 @@ func loadSessionHeaderEnabled() bool {
 // requestHeaders returns the per-request identification headers OpenCode Zen
 // expects from a gateway: x-opencode-session (when enabled and a session is
 // known), x-opencode-client, and a non-generic User-Agent. The same set is
-// applied on both the /chat/completions and /messages paths.
+// applied by the CompatibleProvider SetHeaders hook on every typed path
+// (/chat/completions, /messages, and /responses) and by the passthrough
+// header merge.
 func requestHeaders(sessionEnabled bool) func(context.Context) http.Header {
 	userAgent := "gomodel/" + version.Version
 	return func(ctx context.Context) http.Header {
@@ -67,14 +69,6 @@ func requestHeaders(sessionEnabled bool) func(context.Context) http.Header {
 			}
 		}
 		return headers
-	}
-}
-
-// chatRequestHeaders adapts requestHeaders to the ChatRequestHeaders hook
-// signature of the OpenAI-compatible provider.
-func chatRequestHeaders(fn func(context.Context) http.Header) func(context.Context, *core.ChatRequest) http.Header {
-	return func(ctx context.Context, _ *core.ChatRequest) http.Header {
-		return fn(ctx)
 	}
 }
 

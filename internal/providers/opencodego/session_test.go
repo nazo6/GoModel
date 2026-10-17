@@ -28,6 +28,10 @@ func headerServer(t *testing.T) (*httptest.Server, *providertest.Capture) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/responses" {
+			_, _ = w.Write([]byte(providertest.ResponsesJSON))
+			return
+		}
 		if r.URL.Path == "/messages" {
 			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"qwen3.7-max","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
 			return
@@ -78,6 +82,27 @@ func TestRequestHeaders_StreamCarriesSession(t *testing.T) {
 	}
 }
 
+// TestRequestHeaders_ResponsesPathCarriesSession pins that the native
+// /responses path (responsesModels) receives the same identification headers
+// and bearer credential as the chat paths.
+func TestRequestHeaders_ResponsesPathCarriesSession(t *testing.T) {
+	t.Setenv(responsesModelsEnvVar, "")
+	server, capture := headerServer(t)
+	ctx := core.WithSessionID(context.Background(), "session-responses")
+
+	resp, err := newTestProvider(server.URL, server.Client()).Responses(ctx, &core.ResponsesRequest{Model: "grok-4.7", Input: "hi"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, providertest.ResponsesID, resp.ID)
+
+	got := capture.Last(t)
+	assert.Equal(t, "/responses", got.Path)
+	assert.Equal(t, "session-responses", got.Header.Get(sessionHeader))
+	assert.Equal(t, defaultClient, got.Header.Get(clientHeader))
+	assert.Equal(t, "gomodel/"+version.Version, got.Header.Get("User-Agent"))
+	assert.Equal(t, "Bearer sk-opencode", got.Header.Get("Authorization"))
+}
+
 func TestRequestHeaders_InboundOpenCodeHeadersWin(t *testing.T) {
 	server, capture := headerServer(t)
 	ctx := core.WithSessionID(context.Background(), "scoped-detected")
@@ -121,26 +146,38 @@ func TestRequestHeaders_Disabled(t *testing.T) {
 	}
 }
 
-func TestNew_FactoryConstructorWiresHeadersOnBothPaths(t *testing.T) {
+func TestNew_FactoryConstructorWiresHeadersOnEveryPath(t *testing.T) {
 	// Pin the env-driven defaults so an inherited override cannot disable the
-	// header or reroute the /messages model through /chat/completions.
+	// header or reroute a model onto another surface.
 	t.Setenv(sessionHeaderEnvVar, "")
 	t.Setenv(messagesModelsEnvVar, "qwen3.7-max")
+	t.Setenv(responsesModelsEnvVar, "")
 	server, capture := headerServer(t)
 	ctx := core.WithSessionID(context.Background(), "session-factory")
 	provider := New(providers.ProviderConfig{APIKey: "sk-opencode", BaseURL: server.URL}, providers.ProviderOptions{})
 
 	tests := []struct {
+		name     string
 		model    string
 		wantPath string
+		invoke   func(model string) error
 	}{
-		{model: "glm-5.1", wantPath: "/chat/completions"},
-		{model: "qwen3.7-max", wantPath: "/messages"},
+		{"chat completions", "glm-5.1", "/chat/completions", func(model string) error {
+			_, err := provider.ChatCompletion(ctx, chatRequest(model))
+			return err
+		}},
+		{"messages", "qwen3.7-max", "/messages", func(model string) error {
+			_, err := provider.ChatCompletion(ctx, chatRequest(model))
+			return err
+		}},
+		{"responses", "grok-4.7", "/responses", func(model string) error {
+			_, err := provider.Responses(ctx, &core.ResponsesRequest{Model: model, Input: "hi"})
+			return err
+		}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.model, func(t *testing.T) {
-			_, err := provider.ChatCompletion(ctx, chatRequest(tt.model))
-			require.NoError(t, err)
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, tt.invoke(tt.model))
 
 			got := capture.Last(t)
 			assert.Equal(t, tt.wantPath, got.Path)

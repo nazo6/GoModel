@@ -5,6 +5,7 @@ package opencodego
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -25,6 +26,10 @@ const defaultBaseURL = "https://opencode.ai/zen/go/v1"
 // must be routed to the Anthropic-native /messages endpoint.
 const messagesModelsEnvVar = "OPENCODE_GO_MESSAGES_MODELS"
 
+// responsesModelsEnvVar names a comma-separated override list of model IDs
+// that must be routed to the Responses-native /responses endpoint.
+const responsesModelsEnvVar = "OPENCODE_GO_RESPONSES_MODELS"
+
 // defaultMessagesModels lists the model IDs OpenCode Zen serves ONLY on its
 // Anthropic-native /messages endpoint — /chat/completions rejects them with
 // "not supported for format oa-compat". This is a temporary hardcoded set;
@@ -32,6 +37,16 @@ const messagesModelsEnvVar = "OPENCODE_GO_MESSAGES_MODELS"
 // maintained here and can be overridden with OPENCODE_GO_MESSAGES_MODELS until
 // metadata-driven routing replaces it.
 var defaultMessagesModels = []string{"qwen3.7-max"}
+
+// defaultResponsesModels lists the model IDs OpenCode Zen serves ONLY on its
+// Responses API — /chat/completions and /messages reject them with
+// "ModelProtocolUnsupported". Like defaultMessagesModels this is a temporary
+// hardcoded set, maintained here until upstream exposes per-model endpoint
+// metadata, and overridable with OPENCODE_GO_RESPONSES_MODELS. Chat-completions
+// ingress for these models is not translated up to Responses yet
+// (ENTERPILOT/GoModel#1084); until it is, they are reachable through
+// /v1/responses.
+var defaultResponsesModels = []string{"grok-4.7", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor"}
 
 // Registration provides factory registration for the OpenCode Go provider.
 // The "opencode_go" type derives OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL, and
@@ -54,20 +69,25 @@ type messagesProvider interface {
 
 // Provider implements the core.Provider interface for OpenCode Go.
 //
-// OpenCode Zen exposes two upstream dialects behind one base URL: OpenAI-style
-// /chat/completions (most models) and Anthropic-style /messages (a few models
-// rejected by /chat/completions). The embedded ChatCompatible handles the
-// former; chat requests for models in messagesModels are delegated to an
-// Anthropic provider pinned to the same base URL, mirroring how GoModel already
-// serves /v1/messages for native Anthropic. Both paths normalize to the
-// canonical OpenAI-shaped response, so callers see one consistent surface.
+// OpenCode Zen exposes three upstream dialects behind one base URL:
+// OpenAI-style /chat/completions (most models), Anthropic-style /messages (a
+// few models rejected by /chat/completions), and the Responses API (models
+// rejected by both). The embedded ChatCompatible handles the former; chat
+// requests for models in messagesModels are delegated to an Anthropic provider
+// pinned to the same base URL, mirroring how GoModel already serves
+// /v1/messages for native Anthropic; Responses requests for models in
+// responsesModels are forwarded natively to /responses. Every path normalizes
+// to the canonical OpenAI-shaped response, so callers see one consistent
+// surface.
 type Provider struct {
 	*openai.ChatCompatible
-	messages       messagesProvider
-	messagesModels map[string]struct{}
+	messages        messagesProvider
+	messagesModels  map[string]struct{}
+	responsesModels map[string]struct{}
 	// headers yields the session/client identification headers (session.go).
-	// Typed requests receive them through the ChatCompatible and Anthropic
-	// hooks; Passthrough merges them under the caller's opaque headers.
+	// Typed requests receive them through the CompatibleProvider SetHeaders
+	// hook and the Anthropic request-headers hook; Passthrough merges them
+	// under the caller's opaque headers.
 	headers func(context.Context) http.Header
 }
 
@@ -84,34 +104,71 @@ func New(cfg providers.ProviderConfig, opts providers.ProviderOptions) core.Prov
 	if native, ok := messages.(*anthropic.Provider); ok {
 		native.SetRequestHeaders(headers)
 	}
+	messagesModels := loadMessagesModels()
+	responsesModels := loadResponsesModels()
+	// A model speaks exactly one upstream surface: until upstream exposes
+	// per-model metadata, a misconfigured overlap would route the two ingress
+	// directions to different dialects. Prefer the native Responses surface
+	// and warn so the deployer can fix the lists.
+	for id := range responsesModels {
+		if _, ok := messagesModels[id]; ok {
+			slog.Warn("model listed in both OpenCode Go surface lists; using the Responses surface",
+				"model", id,
+				"messages_env", messagesModelsEnvVar,
+				"responses_env", responsesModelsEnvVar)
+			delete(messagesModels, id)
+		}
+	}
 	return &Provider{
-		ChatCompatible: chat,
-		messages:       messages,
-		messagesModels: loadMessagesModels(),
-		headers:        headers,
+		ChatCompatible:  chat,
+		messages:        messages,
+		messagesModels:  messagesModels,
+		responsesModels: responsesModels,
+		headers:         headers,
 	}
 }
 
-// compatibleConfig describes the OpenAI-compatible /chat/completions half of
-// the provider. The AdaptChatRequest hook carries OpenCode Zen's reasoning
-// quirk (see reasoning.go) plus DeepSeek's rules for DeepSeek models (see
-// deepseek.go), and ChatRequestHeaders its session/client identification
-// headers (see session.go), so /v1/responses picks them up through
-// ResponsesViaChat as well.
+// compatibleConfig describes the OpenAI-compatible half of the provider. The
+// AdaptChatRequest hook carries OpenCode Zen's reasoning quirk (see
+// reasoning.go) plus DeepSeek's rules for DeepSeek models (see deepseek.go).
+// SetHeaders carries the bearer credential and the session/client
+// identification headers (see session.go) on every typed request, so the
+// native /responses path and the Responses-via-chat translation send them
+// too; request-specific headers are applied after it and still win, keeping
+// passthrough's caller-wins semantics.
 func compatibleConfig(baseURL string, headers func(context.Context) http.Header) openai.CompatibleProviderConfig {
 	return openai.CompatibleProviderConfig{
-		ProviderName:       "opencode_go",
-		BaseURL:            baseURL,
-		AdaptChatRequest:   chatRequestAdapter(loadDefaultReasoningEffort(), deepseek.LoadJSONSchemaMode()),
-		ChatRequestHeaders: chatRequestHeaders(headers),
+		ProviderName:     "opencode_go",
+		BaseURL:          baseURL,
+		AdaptChatRequest: chatRequestAdapter(loadDefaultReasoningEffort(), deepseek.LoadJSONSchemaMode()),
+		SetHeaders: func(req *http.Request, apiKey string) {
+			providers.SetAuthHeaders(req, apiKey, providers.AuthHeaderConfig{AuthScheme: "Bearer "})
+			for name, values := range headers(req.Context()) {
+				if !hasHeader(req.Header, name) {
+					req.Header[http.CanonicalHeaderKey(name)] = values
+				}
+			}
+		},
 	}
 }
 
-// loadMessagesModels returns the set of model IDs routed to /messages, using the
-// OPENCODE_GO_MESSAGES_MODELS override when present.
+// loadMessagesModels returns the set of model IDs routed to /messages, using
+// the OPENCODE_GO_MESSAGES_MODELS override when present.
 func loadMessagesModels() map[string]struct{} {
-	ids := defaultMessagesModels
-	if override := strings.TrimSpace(os.Getenv(messagesModelsEnvVar)); override != "" {
+	return loadModelSet(messagesModelsEnvVar, defaultMessagesModels)
+}
+
+// loadResponsesModels returns the set of model IDs routed to /responses, using
+// the OPENCODE_GO_RESPONSES_MODELS override when present.
+func loadResponsesModels() map[string]struct{} {
+	return loadModelSet(responsesModelsEnvVar, defaultResponsesModels)
+}
+
+// loadModelSet returns the model IDs in the comma-separated env override when
+// present, and in defaults otherwise. IDs are trimmed and empties dropped.
+func loadModelSet(envVar string, defaults []string) map[string]struct{} {
+	ids := defaults
+	if override := strings.TrimSpace(os.Getenv(envVar)); override != "" {
 		ids = strings.Split(override, ",")
 	}
 	set := make(map[string]struct{}, len(ids))
@@ -124,13 +181,24 @@ func loadMessagesModels() map[string]struct{} {
 }
 
 // usesMessages reports whether a model must be served through the Anthropic
-// /messages endpoint. It matches on the bare model ID, tolerating an
-// "opencode_go/" provider prefix.
+// /messages endpoint.
 func (p *Provider) usesMessages(model string) bool {
+	return inModelSet(p.messagesModels, model)
+}
+
+// usesResponses reports whether a model must be served through the native
+// Responses API.
+func (p *Provider) usesResponses(model string) bool {
+	return inModelSet(p.responsesModels, model)
+}
+
+// inModelSet reports whether a model belongs to set. It matches on the bare
+// model ID, tolerating an "opencode_go/" provider prefix.
+func inModelSet(set map[string]struct{}, model string) bool {
 	if i := strings.LastIndex(model, "/"); i >= 0 {
 		model = model[i+1:]
 	}
-	_, ok := p.messagesModels[model]
+	_, ok := set[model]
 	return ok
 }
 
@@ -151,15 +219,22 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req *core.ChatReque
 	return p.ChatCompatible.StreamChatCompletion(ctx, req)
 }
 
-// Responses dispatches through this provider's ChatCompletion so /v1/responses
-// honors the per-model /messages routing.
+// Responses serves each model on its native upstream surface: models in
+// responsesModels are forwarded natively to /responses, and every other model
+// keeps the chat-completions translation, which honors the per-model /messages
+// routing through this provider's ChatCompletion.
 func (p *Provider) Responses(ctx context.Context, req *core.ResponsesRequest) (*core.ResponsesResponse, error) {
+	if req != nil && p.usesResponses(req.Model) {
+		return p.Compatible().Responses(ctx, req)
+	}
 	return providers.ResponsesViaChat(ctx, p, req, "opencode_go")
 }
 
-// StreamResponses dispatches through this provider's streaming ChatCompletion so
-// /v1/responses honors the per-model /messages routing.
+// StreamResponses mirrors Responses' per-model upstream surface routing.
 func (p *Provider) StreamResponses(ctx context.Context, req *core.ResponsesRequest) (io.ReadCloser, error) {
+	if req != nil && p.usesResponses(req.Model) {
+		return p.Compatible().StreamResponses(ctx, req)
+	}
 	return providers.StreamResponsesViaChat(ctx, p, req, "opencode_go")
 }
 
