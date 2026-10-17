@@ -46,24 +46,33 @@ OPENCODE_GO_MODELS=glm-5.1,kimi-k2.7-code,deepseek-v4-pro
 ## Endpoints
 
 OpenCode Zen serves most models on OpenAI-style `/chat/completions` (Bearer
-auth) and a few models only on the Anthropic-native `/messages` endpoint
-(`x-api-key` auth). GoModel routes per model:
+auth), a few models only on the Anthropic-native `/messages` endpoint
+(`x-api-key` auth), and some models only on its Responses API. GoModel routes
+per model:
 
 - **OpenAI-style models** (GLM, Kimi, DeepSeek, MiMo, MiniMax, most Qwen) go to
   `/chat/completions`. `/models` and `/v1/responses` (translated to chat
   completions) use the same path.
 - **Anthropic-only models** are translated to the Anthropic Messages dialect and
   sent to `/messages`, mirroring how GoModel already serves native Anthropic.
-  Both paths normalize to the same OpenAI-compatible response, so clients see
-  one consistent surface regardless of which model they pick — whether they call
-  `/v1/chat/completions` or `/v1/messages`.
+- **Responses-only models** (`grok-4.7`, `muse-spark-1.2-contributor`,
+  `muse-spark-1.3-contributor`) are forwarded natively on `/v1/responses` to the
+  upstream `/responses` endpoint. Chat-completions requests for them are not
+  translated up to Responses yet, so reach them through a Responses-API client
+  and keep them out of chat-only routes until that translation lands.
 
-The set of `/messages`-only models is currently maintained manually (default:
-`qwen3.7-max`) because OpenCode Zen does not yet expose per-model endpoint
-metadata. Override it when needed:
+Every path normalizes to the same OpenAI-compatible response, so clients see
+one consistent surface regardless of which model they pick — whether they call
+`/v1/chat/completions`, `/v1/messages`, or `/v1/responses`.
+
+The sets of `/messages`-only and `/responses`-only models are currently
+maintained manually (defaults: `qwen3.7-max`, and `grok-4.7`,
+`muse-spark-1.2-contributor`, `muse-spark-1.3-contributor`) because OpenCode Zen
+does not yet expose per-model endpoint metadata. Override them when needed:
 
 ```bash
 OPENCODE_GO_MESSAGES_MODELS=qwen3.7-max
+OPENCODE_GO_RESPONSES_MODELS=grok-4.7,muse-spark-1.2-contributor,muse-spark-1.3-contributor
 ```
 
 <Note>
@@ -76,8 +85,9 @@ OPENCODE_GO_MESSAGES_MODELS=qwen3.7-max
 OpenCode Zen asks every client to send an `x-opencode-session` header so it
 can route one conversation to the same upstream and keep its prompt cache
 warm. Upstream has announced that requests without it may start failing.
-GoModel adds the header to every OpenCode Go request by default, on both the
-`/chat/completions` and `/messages` paths, using the first available value:
+GoModel adds the header to every OpenCode Go request by default — on the
+`/chat/completions`, `/messages`, and `/responses` paths — using the first
+available value:
 
 1. An `x-opencode-session` header sent by the client (OpenCode itself, pi, and
    other tools that speak OpenCode Zen's dialect) is forwarded verbatim.
