@@ -27,7 +27,8 @@ const defaultBaseURL = "https://opencode.ai/zen/go/v1"
 const messagesModelsEnvVar = "OPENCODE_GO_MESSAGES_MODELS"
 
 // responsesModelsEnvVar names a comma-separated override list of model IDs
-// that must be routed to the Responses-native /responses endpoint.
+// that must be routed to the Responses-native /responses endpoint. When set,
+// it replaces both default model lists entirely.
 const responsesModelsEnvVar = "OPENCODE_GO_RESPONSES_MODELS"
 
 // defaultMessagesModels lists the model IDs OpenCode Zen serves ONLY on its
@@ -38,15 +39,21 @@ const responsesModelsEnvVar = "OPENCODE_GO_RESPONSES_MODELS"
 // metadata-driven routing replaces it.
 var defaultMessagesModels = []string{"qwen3.7-max"}
 
-// defaultResponsesModels lists the model IDs OpenCode Zen serves ONLY on its
-// Responses API — /chat/completions and /messages reject them with
+// defaultResponsesOnlyModels lists the model IDs OpenCode Zen serves ONLY on
+// its Responses API — /chat/completions and /messages reject them with
 // "ModelProtocolUnsupported". Like defaultMessagesModels this is a temporary
 // hardcoded set, maintained here until upstream exposes per-model endpoint
-// metadata, and overridable with OPENCODE_GO_RESPONSES_MODELS. Chat-completions
-// ingress for these models is not translated up to Responses yet
-// (ENTERPILOT/GoModel#1084); until it is, they are reachable through
-// /v1/responses.
-var defaultResponsesModels = []string{"grok-4.7", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor"}
+// metadata. Chat-completions ingress for these models is not translated up to
+// Responses yet (ENTERPILOT/GoModel#1084); until it is, they are reachable
+// through /v1/responses.
+var defaultResponsesOnlyModels = []string{"grok-4.7", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor"}
+
+// defaultDualSurfaceModels lists the model IDs OpenCode Zen serves on BOTH
+// /chat/completions and /responses. Chat ingress keeps the chat surface;
+// Responses ingress goes native. deepseek-v4.1-flash needs the native surface
+// because Zen's chat path rejects non-string tool message content, which
+// flattens image-bearing tool results arriving through /v1/responses.
+var defaultDualSurfaceModels = []string{"deepseek-v4.1-flash"}
 
 // Registration provides factory registration for the OpenCode Go provider.
 // The "opencode_go" type derives OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL, and
@@ -158,19 +165,22 @@ func loadMessagesModels() map[string]struct{} {
 	return loadModelSet(messagesModelsEnvVar, defaultMessagesModels)
 }
 
-// loadResponsesModels returns the set of model IDs routed to /responses, using
-// the OPENCODE_GO_RESPONSES_MODELS override when present.
+// loadResponsesModels returns the set of model IDs routed natively to
+// /responses: the responses-only and dual-surface defaults, or the
+// OPENCODE_GO_RESPONSES_MODELS override when present.
 func loadResponsesModels() map[string]struct{} {
-	return loadModelSet(responsesModelsEnvVar, defaultResponsesModels)
+	if override := strings.TrimSpace(os.Getenv(responsesModelsEnvVar)); override != "" {
+		return modelSet(strings.Split(override, ","))
+	}
+	set := modelSet(defaultResponsesOnlyModels)
+	for _, id := range defaultDualSurfaceModels {
+		set[id] = struct{}{}
+	}
+	return set
 }
 
-// loadModelSet returns the model IDs in the comma-separated env override when
-// present, and in defaults otherwise. IDs are trimmed and empties dropped.
-func loadModelSet(envVar string, defaults []string) map[string]struct{} {
-	ids := defaults
-	if override := strings.TrimSpace(os.Getenv(envVar)); override != "" {
-		ids = strings.Split(override, ",")
-	}
+// modelSet builds the lookup set from trimmed, non-empty model IDs.
+func modelSet(ids []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		if id = strings.TrimSpace(id); id != "" {
@@ -178,6 +188,15 @@ func loadModelSet(envVar string, defaults []string) map[string]struct{} {
 		}
 	}
 	return set
+}
+
+// loadModelSet returns the model IDs in the comma-separated env override when
+// present, and in defaults otherwise.
+func loadModelSet(envVar string, defaults []string) map[string]struct{} {
+	if override := strings.TrimSpace(os.Getenv(envVar)); override != "" {
+		return modelSet(strings.Split(override, ","))
+	}
+	return modelSet(defaults)
 }
 
 // usesMessages reports whether a model must be served through the Anthropic
