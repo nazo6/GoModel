@@ -218,7 +218,7 @@ func (e *ResponsesInputElement) UnmarshalJSON(data []byte) error {
 			_ = json.Unmarshal(v, &e.Status)
 		}
 		if v, ok := raw["output"]; ok {
-			e.Output = stringifyRawValue(v)
+			e.Output = decodeOutputValue(v)
 		}
 	case "", "message":
 		if v, ok := raw["role"]; ok {
@@ -280,15 +280,21 @@ func (e ResponsesInputElement) MarshalJSON() ([]byte, error) {
 			Status:    e.Status,
 		}, e.ExtraFields)
 	case "function_call_output":
+		// An `any` field's omitempty only drops nil, so map an empty output to
+		// nil to keep omitting it the way the former string field did.
+		output := any(e.Output)
+		if s, ok := output.(string); ok && s == "" {
+			output = nil
+		}
 		return marshalWithUnknownJSONFields(struct {
 			Type   string `json:"type"`
 			CallID string `json:"call_id,omitempty"`
-			Output string `json:"output,omitempty"`
+			Output any    `json:"output,omitempty"`
 			Status string `json:"status,omitempty"`
 		}{
 			Type:   "function_call_output",
 			CallID: e.CallID,
-			Output: e.Output,
+			Output: output,
 			Status: e.Status,
 		}, e.ExtraFields)
 	case "", "message":
@@ -411,4 +417,46 @@ func stringifyRawValue(raw json.RawMessage) string {
 		}
 	}
 	return string(trimmed)
+}
+
+// decodeOutputValue preserves the function_call_output output shape: JSON
+// strings unwrap to their text, arrays stay verbatim because they carry
+// output content parts (input_image, …) that must not be flattened into
+// base64 text, and any other value keeps its legacy stringified form.
+// null decodes to an empty string.
+func decodeOutputValue(raw json.RawMessage) any {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || IsJSONNull(trimmed) {
+		return ""
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err == nil {
+			return s
+		}
+	}
+	if trimmed[0] == '[' {
+		return json.RawMessage(trimmed)
+	}
+	return string(trimmed)
+}
+
+// OutputText renders a function_call_output output as plain text for
+// consumers that treat the tool result as a string: strings pass through,
+// and any other JSON value returns its raw JSON text.
+func OutputText(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case json.RawMessage:
+		return string(t)
+	default:
+		encoded, err := json.Marshal(t)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	}
 }

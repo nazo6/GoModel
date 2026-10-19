@@ -177,7 +177,11 @@ type ResponsesInputElement struct {
 	Arguments string `json:"arguments,omitempty"`
 
 	// Function call output fields (type="function_call_output") — CallID shared above
-	Output      string            `json:"output,omitempty"`
+	// Output holds the tool result: a plain string, or — as the Responses spec
+	// allows — an array of output content parts. Array form is preserved
+	// verbatim (see decodeOutputValue) so multimodal tool results such as
+	// screenshots reach the model as image parts instead of base64 text.
+	Output      any               `json:"output,omitempty"`
 	Raw         json.RawMessage   `json:"-" swaggerignore:"true"`
 	ExtraFields UnknownJSONFields `json:"-" swaggerignore:"true"`
 }

@@ -2,6 +2,7 @@ package opencodego
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,6 +180,43 @@ func TestResponses_RoutesByModel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResponses_PreservesArrayFormToolOutput pins the multimodal tool-result
+// contract on the native /responses path: array-form function_call_output
+// outputs (input_image parts, as VS Code and other clients return screenshots)
+// are forwarded verbatim instead of being flattened into base64 text, which
+// upstream tokenizers would count as message tokens (context-length 400s).
+func TestResponses_PreservesArrayFormToolOutput(t *testing.T) {
+	t.Setenv(messagesModelsEnvVar, "")
+	t.Setenv(responsesModelsEnvVar, "")
+	server, capture := surfaceServer(t)
+
+	resp, err := newTestProvider(server.URL, server.Client()).Responses(context.Background(), &core.ResponsesRequest{
+		Model: "grok-4.7",
+		Input: []core.ResponsesInputElement{
+			{Type: "function_call_output", CallID: "call_1",
+				Output: json.RawMessage(`[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]`)},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	sent := capture.Last(t).JSON(t)
+	input, ok := sent["input"].([]any)
+	require.True(t, ok, "input = %#v, want an array", sent["input"])
+	require.Len(t, input, 1)
+	item, ok := input[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "function_call_output", item["type"])
+	require.Equal(t, "call_1", item["call_id"])
+	output, ok := item["output"].([]any)
+	require.True(t, ok, "output = %#v, want an array on the wire, not stringified base64", item["output"])
+	require.Len(t, output, 1)
+	part, ok := output[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "input_image", part["type"])
+	require.Equal(t, "data:image/png;base64,AAAA", part["image_url"])
 }
 
 // TestStreamResponses_RoutesByModel mirrors the non-streaming routing test for

@@ -113,8 +113,17 @@ function ensureResponsesInputElementSchema() {
       },
       name: { type: "string" },
       output: {
-        description: 'Function call output fields (type="function_call_output") - CallID shared above',
-        type: "string",
+        description:
+          'Function call output fields (type="function_call_output") - CallID shared above. '
+          + 'Arrays of output content parts (e.g. input_image) are preserved verbatim '
+          + 'so multimodal tool results reach the model as image parts.',
+        oneOf: [
+          { type: "string" },
+          {
+            type: "array",
+            items: { $ref: "#/components/schemas/core.ResponsesContentItem" },
+          },
+        ],
       },
       role: {
         description: 'Message fields (type="" or "message")',

@@ -204,7 +204,7 @@ func responsesItemMessages(items []core.ResponsesInputElement) []genAIMessage {
 			out = append(out, genAIMessage{Role: "tool", Parts: []genAIPart{{
 				Type:     "tool_call_response",
 				ID:       item.CallID,
-				Response: truncateContent(item.Output),
+				Response: truncateContent(core.OutputText(item.Output)),
 			}}})
 		}
 	}
