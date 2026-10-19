@@ -57,8 +57,8 @@ func messageFromInputElement(id string, el core.ResponsesInputElement) (pluginap
 		}}}, nil
 	case "function_call_output":
 		result := &pluginapi.ToolResult{CallID: el.CallID}
-		if el.Output != "" {
-			result.Parts = []pluginapi.Part{{Kind: pluginapi.PartText, Text: el.Output}}
+		if text := core.OutputText(el.Output); text != "" {
+			result.Parts = []pluginapi.Part{{Kind: pluginapi.PartText, Text: text}}
 		}
 		return pluginapi.Message{ID: id, Role: pluginapi.RoleTool, ToolCallID: el.CallID, Parts: []pluginapi.Part{{
 			Kind: pluginapi.PartToolResult, ToolResult: result,
@@ -316,7 +316,7 @@ func patchInputMap(origMap map[string]any, item inputItem) (map[string]any, erro
 	if item.elem.Type == "function_call_output" {
 		if _, wasString := origMap["output"].(string); !wasString {
 			var decoded any
-			if err := json.Unmarshal([]byte(item.elem.Output), &decoded); err == nil {
+			if err := json.Unmarshal([]byte(core.OutputText(item.elem.Output)), &decoded); err == nil {
 				out["output"] = decoded
 			}
 		}

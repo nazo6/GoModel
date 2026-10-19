@@ -67,7 +67,64 @@ func TestResponsesRequestUnmarshalJSON_ArrayInputFunctionCall(t *testing.T) {
 	require.Equal(t, "call_123", input[1].CallID, "Input[1] = %+v, want function_call_output with call_id=call_123", input[1])
 	require.Equal(t, `{"temperature_c":21}`, input[1].Output)
 }
+// TestResponsesRequestUnmarshalJSON_ArrayFormToolOutputPreserved pins the
+// function_call_output output contract: array-form outputs stay verbatim so
+// multimodal tool results (input_image parts) reach the model as image parts
+// instead of being flattened into base64 text.
+func TestResponsesRequestUnmarshalJSON_ArrayFormToolOutputPreserved(t *testing.T) {
+	const imagePart = `[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]`
+	var req ResponsesRequest
+	err := json.Unmarshal([]byte(`{"model":"gpt-4o-mini","input":[
+		{"type":"function_call_output","call_id":"call_1","output":`+imagePart+`}
+	]}`), &req)
+	require.NoError(t, err)
 
+	input, ok := req.Input.([]ResponsesInputElement)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+	raw, ok := input[0].Output.(json.RawMessage)
+	require.True(t, ok, "Output = %T, want json.RawMessage for array-form tool results", input[0].Output)
+	require.JSONEq(t, imagePart, string(raw))
+
+	// The array survives a full request round trip unchanged.
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	var decoded struct {
+		Input []struct {
+			Output any `json:"output"`
+		} `json:"input"`
+	}
+	require.NoError(t, json.Unmarshal(body, &decoded))
+	require.Len(t, decoded.Input, 1)
+	parts, ok := decoded.Input[0].Output.([]any)
+	require.True(t, ok, "wire output = %#v, want an array", decoded.Input[0].Output)
+	require.Len(t, parts, 1)
+	part, ok := parts[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "input_image", part["type"])
+	require.Equal(t, "data:image/png;base64,AAAA", part["image_url"])
+}
+
+// TestResponsesInputElementMarshalJSON_StringAndEmptyToolOutput pins the
+// string forms: plain strings marshal as strings and empty outputs stay
+// omitted, matching the pre-array-support wire format.
+func TestResponsesInputElementMarshalJSON_StringAndEmptyToolOutput(t *testing.T) {
+	body, err := json.Marshal(ResponsesInputElement{
+		Type:   "function_call_output",
+		CallID: "call_1",
+		Output: "42 pixels",
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"function_call_output","call_id":"call_1","output":"42 pixels"}`, string(body))
+
+	body, err = json.Marshal(ResponsesInputElement{Type: "function_call_output", CallID: "call_2", Output: ""})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"function_call_output","call_id":"call_2"}`, string(body))
+
+	body, err = json.Marshal(ResponsesInputElement{Type: "function_call_output", CallID: "call_3"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"function_call_output","call_id":"call_3"}`, string(body))
+}
 func TestResponsesRequestUnmarshalJSON_FunctionCallAcceptsIDField(t *testing.T) {
 	var req ResponsesRequest
 	err := json.Unmarshal([]byte(`{"model":"gpt-4o-mini","input":[
