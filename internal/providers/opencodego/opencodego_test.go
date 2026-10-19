@@ -159,6 +159,7 @@ func TestResponses_RoutesByModel(t *testing.T) {
 	}{
 		{"responses-native", "grok-4.7", "/responses"},
 		{"prefixed responses-native", "opencode_go/muse-spark-1.3-contributor", "/responses"},
+		{"dual-surface native responses", "deepseek-v4.1-flash", "/responses"},
 		{"openai-style", "glm-5.1", "/chat/completions"},
 		{"anthropic-style", "qwen3.7-max", "/messages"},
 	}
