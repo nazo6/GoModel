@@ -244,7 +244,11 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req *core.ChatReque
 // routing through this provider's ChatCompletion.
 func (p *Provider) Responses(ctx context.Context, req *core.ResponsesRequest) (*core.ResponsesResponse, error) {
 	if req != nil && p.usesResponses(req.Model) {
-		return p.Compatible().Responses(ctx, req)
+		adapted, err := padNativeResponsesReasoning(req)
+		if err != nil {
+			return nil, err
+		}
+		return p.Compatible().Responses(ctx, adapted)
 	}
 	return providers.ResponsesViaChat(ctx, p, req, "opencode_go")
 }
@@ -252,7 +256,11 @@ func (p *Provider) Responses(ctx context.Context, req *core.ResponsesRequest) (*
 // StreamResponses mirrors Responses' per-model upstream surface routing.
 func (p *Provider) StreamResponses(ctx context.Context, req *core.ResponsesRequest) (io.ReadCloser, error) {
 	if req != nil && p.usesResponses(req.Model) {
-		return p.Compatible().StreamResponses(ctx, req)
+		adapted, err := padNativeResponsesReasoning(req)
+		if err != nil {
+			return nil, err
+		}
+		return p.Compatible().StreamResponses(ctx, adapted)
 	}
 	return providers.StreamResponsesViaChat(ctx, p, req, "opencode_go")
 }
