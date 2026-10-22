@@ -3,7 +3,14 @@ title: "OpenCode Go: Base URL & OpenAI-Compatible Endpoint"
 sidebarTitle: "OpenCode Go"
 description: "Configure OpenCode Zen (Go subscription) in GoModel using an OpenAI-compatible endpoint."
 icon: "terminal"
-keywords: ["OpenCode Zen", "OpenCode Go", "OPENCODE_GO_BASE_URL", "OpenCode Go endpoint", "provider setup"]
+keywords:
+  [
+    "OpenCode Zen",
+    "OpenCode Go",
+    "OPENCODE_GO_BASE_URL",
+    "OpenCode Go endpoint",
+    "provider setup",
+  ]
 ---
 
 [OpenCode Zen](https://opencode.ai/docs/zen/) exposes its "Go" subscription
@@ -155,6 +162,13 @@ DeepSeek provider, including when a virtual model routes to them:
 present, and `json_schema` structured output follows
 `DEEPSEEK_JSON_SCHEMA_MODE`. See
 [DeepSeek](/providers/deepseek#structured-outputs) for details.
+
+The same replay requirement applies on the native Responses path
+(`deepseek-v4.1-flash`). Responses clients such as VS Code replay a reasoning
+item only when it carries `encrypted_content`, which DeepSeek turns never have,
+so GoModel inserts a neutral reasoning item ahead of every assistant turn that
+arrived without one whenever the request declares tools. Clients do not need to
+echo thinking content back to stay compatible.
 
 ## Not supported
 
